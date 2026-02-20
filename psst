@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# psst - local secret manager for AI agent workflows
+# Secrets are encrypted at rest and injected into subprocesses
+# without ever appearing in the agent's context.
+
+PSST_DIR=".psst"
+SECRETS_DIR="$PSST_DIR/secrets"
+KEY_REF="$PSST_DIR/.key"       # Pointer file: contains the name of the real key
+SSH_DIR="$HOME/.ssh"
+
+# ── Helpers ──────────────────────────────────────────────────────
+
+die()  { echo "psst: $*" >&2; exit 1; }
+info() { echo "psst: $*" >&2; }
+
+# Resolve the actual key path from the pointer file
+_key_path() {
+    local key_name
+    key_name=$(cat "$KEY_REF" 2>/dev/null) || die "cannot read key reference"
+    [[ -n "$key_name" ]] || die "empty key reference in $KEY_REF"
+    echo "$SSH_DIR/$key_name"
+}
+
+need_vault() {
+    [[ -d "$PSST_DIR" ]]    || die "no vault found. Run: psst init"
+    [[ -f "$KEY_REF" ]]     || die "missing key reference. Re-run: psst init"
+    [[ -d "$SECRETS_DIR" ]] || die "missing secrets dir. Re-run: psst init"
+    local key_path
+    key_path=$(_key_path)
+    [[ -f "$key_path" ]]    || die "encryption key not found at $key_path"
+}
+
+# Detect whether openssl supports -pbkdf2 (OpenSSL 1.1.1+).
+# LibreSSL on macOS does not, so we fall back gracefully.
+_openssl_kdf_flag() {
+    if echo -n "" | openssl enc -aes-256-cbc -pbkdf2 -pass pass:test -e 2>/dev/null | head -c0; then
+        echo "-pbkdf2"
+    else
+        echo ""
+    fi
+}
+
+_encrypt() {
+    local kdf key_path
+    kdf=$(_openssl_kdf_flag)
+    key_path=$(_key_path)
+    # shellcheck disable=SC2086
+    openssl enc -aes-256-cbc $kdf -a -A -salt -pass "file:$key_path" 2>/dev/null
+}
+
+_decrypt() {
+    local kdf key_path
+    kdf=$(_openssl_kdf_flag)
+    key_path=$(_key_path)
+    # shellcheck disable=SC2086
+    openssl enc -aes-256-cbc $kdf -a -A -d -salt -pass "file:$key_path" 2>/dev/null
+}
+
+_timestamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+_secret_file() { echo "$SECRETS_DIR/$1"; }
+
+_valid_name() {
+    [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid secret name '$1' (use letters, digits, underscores)"
+}
+
+# Read the current (last) value for a secret
+_get_current() {
+    local file
+    file=$(_secret_file "$1")
+    [[ -f "$file" ]] || die "secret '$1' not found"
+    local last_line
+    last_line=$(tail -1 "$file")
+    local encrypted="${last_line#*$'\t'}"
+    echo "$encrypted" | _decrypt
+}
+
+# ── Commands ─────────────────────────────────────────────────────
+
+cmd_init() {
+    if [[ -d "$PSST_DIR" ]]; then
+        info "vault already exists at $PSST_DIR"
+        return 0
+    fi
+
+    mkdir -p "$SECRETS_DIR"
+    chmod 700 "$PSST_DIR" "$SECRETS_DIR"
+
+    # Ensure ~/.ssh exists with correct permissions
+    mkdir -p "$SSH_DIR"
+    chmod 700 "$SSH_DIR"
+
+    # Generate a random 256-bit key in ~/.ssh/
+    local suffix key_name key_path
+    suffix=$(openssl rand -hex 8)
+    key_name=".psst_${suffix}"
+    key_path="$SSH_DIR/$key_name"
+
+    openssl rand -hex 32 > "$key_path"
+    chmod 600 "$key_path"
+
+    # Write the key name (not the value) into the project pointer file
+    echo "$key_name" > "$KEY_REF"
+    chmod 600 "$KEY_REF"
+
+    # Add to .gitignore if we're in a git repo
+    if [[ -d ".git" ]] || git rev-parse --git-dir &>/dev/null 2>&1; then
+        if [[ -f ".gitignore" ]]; then
+            if ! grep -qxF ".psst/" .gitignore 2>/dev/null; then
+                echo ".psst/" >> .gitignore
+                info "added .psst/ to .gitignore"
+            fi
+        else
+            echo ".psst/" > .gitignore
+            info "created .gitignore with .psst/"
+        fi
+    fi
+
+    info "vault initialized at $PSST_DIR"
+}
+
+cmd_set() {
+    need_vault
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "usage: psst set <NAME>"
+    _valid_name "$name"
+
+    local value
+    if [[ "${2:-}" == "--stdin" ]]; then
+        value=$(cat)
+    else
+        # Interactive prompt with hidden input
+        echo -n "Enter value for $name: " >&2
+        read -rs value
+        echo >&2
+    fi
+
+    [[ -n "$value" ]] || die "empty value"
+
+    local file
+    file=$(_secret_file "$name")
+    local encrypted
+    encrypted=$(echo -n "$value" | _encrypt)
+    echo -e "$(_timestamp)\t${encrypted}" >> "$file"
+    chmod 600 "$file"
+
+    local count
+    count=$(wc -l < "$file" | tr -d ' ')
+    if [[ "$count" -eq 1 ]]; then
+        info "secret '$name' set"
+    else
+        info "secret '$name' updated (version $count)"
+    fi
+}
+
+cmd_get() {
+    need_vault
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "usage: psst get <NAME>"
+    _valid_name "$name"
+    local val
+    val=$(_get_current "$name")
+    printf '%s\n' "$val"
+}
+
+cmd_list() {
+    need_vault
+    if [[ ! -d "$SECRETS_DIR" ]] || [[ -z "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+        info "no secrets stored"
+        return 0
+    fi
+    for f in "$SECRETS_DIR"/*; do
+        local name
+        name=$(basename "$f")
+        local count
+        count=$(wc -l < "$f" | tr -d ' ')
+        if [[ "$count" -gt 1 ]]; then
+            echo "$name  ($count versions)"
+        else
+            echo "$name"
+        fi
+    done
+}
+
+cmd_rm() {
+    need_vault
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "usage: psst rm <NAME>"
+    _valid_name "$name"
+
+    local file
+    file=$(_secret_file "$name")
+    [[ -f "$file" ]] || die "secret '$name' not found"
+
+    rm "$file"
+    info "secret '$name' removed"
+}
+
+cmd_history() {
+    need_vault
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "usage: psst history <NAME>"
+    _valid_name "$name"
+
+    local file
+    file=$(_secret_file "$name")
+    [[ -f "$file" ]] || die "secret '$name' not found"
+
+    local total
+    total=$(wc -l < "$file" | tr -d ' ')
+    local i=1
+
+    echo "History for $name ($total version(s)):"
+    echo ""
+    while IFS=$'\t' read -r ts encrypted; do
+        local label
+        if [[ "$i" -eq "$total" ]]; then
+            label="current"
+        else
+            label="v${i}"
+        fi
+        local preview
+        preview=$(echo "$encrypted" | _decrypt)
+        # Show first 4 chars, mask the rest
+        if [[ ${#preview} -le 4 ]]; then
+            preview="****"
+        else
+            preview="${preview:0:4}$(printf '*%.0s' $(seq 1 $((${#preview} - 4))))"
+        fi
+        printf "  %-10s  %s  %s\n" "$label" "$ts" "$preview"
+        i=$((i + 1))
+    done < "$file"
+}
+
+cmd_import() {
+    need_vault
+    local source="${1:-}"
+    [[ -n "$source" ]] || die "usage: psst import <file>"
+
+    local input
+    if [[ "$source" == "--stdin" ]]; then
+        input=$(cat)
+    else
+        [[ -f "$source" ]] || die "file not found: $source"
+        input=$(cat "$source")
+    fi
+
+    local count=0
+    while IFS= read -r line; do
+        # Skip comments and blank lines
+        [[ -z "$line" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Strip optional 'export ' prefix
+        line="${line#export }"
+
+        # Split on first '='
+        local name="${line%%=*}"
+        local value="${line#*=}"
+
+        # Strip surrounding quotes from value
+        value="${value#\"}"
+        value="${value%\"}"
+        value="${value#\'}"
+        value="${value%\'}"
+
+        # Trim whitespace from name
+        name=$(echo "$name" | xargs)
+
+        [[ -n "$name" ]] && [[ -n "$value" ]] || continue
+        _valid_name "$name" 2>/dev/null || continue
+
+        local file
+        file=$(_secret_file "$name")
+        local encrypted
+        encrypted=$(echo -n "$value" | _encrypt)
+        echo -e "$(_timestamp)\t${encrypted}" >> "$file"
+        chmod 600 "$file"
+        count=$((count + 1))
+    done <<< "$input"
+
+    info "imported $count secret(s)"
+}
+
+cmd_export() {
+    need_vault
+    if [[ ! -d "$SECRETS_DIR" ]] || [[ -z "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+        info "no secrets to export"
+        return 0
+    fi
+    for f in "$SECRETS_DIR"/*; do
+        local name
+        name=$(basename "$f")
+        local value
+        value=$(_get_current "$name")
+        echo "${name}=${value}"
+    done
+}
+
+cmd_run() {
+    need_vault
+    if [[ ! -d "$SECRETS_DIR" ]] || [[ -z "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+        die "no secrets in vault"
+    fi
+
+    [[ $# -gt 0 ]] || die "usage: psst run <command>"
+
+    # Build env vars from all secrets
+    local -a env_args=()
+    for f in "$SECRETS_DIR"/*; do
+        local name
+        name=$(basename "$f")
+        local value
+        value=$(_get_current "$name")
+        env_args+=("${name}=${value}")
+    done
+
+    env "${env_args[@]}" "$@"
+}
+
+cmd_exec_with_secrets() {
+    # psst SECRET1 SECRET2 -- command args...
+    need_vault
+
+    local -a secret_names=()
+    local -a cmd_args=()
+    local found_separator=false
+
+    for arg in "$@"; do
+        if [[ "$arg" == "--" ]]; then
+            found_separator=true
+            continue
+        fi
+        if $found_separator; then
+            cmd_args+=("$arg")
+        else
+            secret_names+=("$arg")
+        fi
+    done
+
+    $found_separator || die "usage: psst SECRET [SECRET...] -- <command>"
+    [[ ${#cmd_args[@]} -gt 0 ]] || die "no command specified after --"
+    [[ ${#secret_names[@]} -gt 0 ]] || die "no secrets specified before --"
+
+    local -a env_args=()
+    for name in "${secret_names[@]}"; do
+        _valid_name "$name"
+        local value
+        value=$(_get_current "$name")
+        env_args+=("${name}=${value}")
+    done
+
+    env "${env_args[@]}" "${cmd_args[@]}"
+}
+
+cmd_help() {
+    cat <<'EOF'
+psst - local secret manager for AI agent workflows
+
+Usage:
+  psst init                      Create vault in current directory
+  psst set <NAME> [--stdin]      Add or update a secret
+  psst get <NAME>                Retrieve a secret value
+  psst list                      List all secrets
+  psst rm <NAME>                 Delete a secret
+  psst history <NAME>            Show version history
+  psst import <file|--stdin>     Import secrets from .env file
+  psst export                    Export all secrets as .env format
+  psst run <command>             Run command with all secrets injected
+  psst <SECRET> [..] -- <cmd>    Run command with specific secrets
+
+Examples:
+  psst init
+  psst set STRIPE_KEY
+  psst import .env
+  psst STRIPE_KEY -- curl -H "Authorization: Bearer $STRIPE_KEY" https://api.stripe.com
+  psst run ./deploy.sh
+EOF
+}
+
+# ── Main dispatch ────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+
+    case "$cmd" in
+        init)    shift; cmd_init "$@" ;;
+        set)     shift; cmd_set "$@" ;;
+        get)     shift; cmd_get "$@" ;;
+        list)    shift; cmd_list "$@" ;;
+        ls)      shift; cmd_list "$@" ;;
+        rm)      shift; cmd_rm "$@" ;;
+        history) shift; cmd_history "$@" ;;
+        import)  shift; cmd_import "$@" ;;
+        export)  shift; cmd_export "$@" ;;
+        run)     shift; cmd_run "$@" ;;
+        help|-h|--help) cmd_help ;;
+        *)
+            # Check if args contain "--" → secret injection mode
+            if [[ "$*" == *" -- "* ]]; then
+                cmd_exec_with_secrets "$@"
+            else
+                die "unknown command '$cmd'. Run: psst help"
+            fi
+            ;;
+    esac
+}
+
+main "$@"
