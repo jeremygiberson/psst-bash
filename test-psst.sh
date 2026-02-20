@@ -871,6 +871,13 @@ test_exec_no_env_unchanged() {
     assert_eq "$out" "vault_val"
 }
 
+test_help_mentions_env() {
+    local out
+    out=$("$PSST" help)
+    assert_contains "$out" ".env"
+    assert_contains "$out" "--vault-only"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -955,6 +962,7 @@ run_test "help shows usage"                 test_help
 run_test "no args shows help"               test_no_args_shows_help
 run_test "--help flag"                      test_help_flag
 run_test "help shows onboard-claude"          test_help_shows_onboard_claude
+run_test "help mentions .env override"        test_help_mentions_env
 echo ""
 
 echo "edge cases"

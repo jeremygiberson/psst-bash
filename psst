@@ -607,8 +607,9 @@ psst - local secret manager for AI agent workflows
 Usage:
   psst init                      Create vault in current directory
   psst set <NAME> [--stdin]      Add or update a secret
-  psst get <NAME>                Retrieve a secret value
-  psst list                      List all secrets
+  psst get [-v] <NAME>           Retrieve a secret value
+  psst get --vault-only <NAME>   Retrieve value from vault (ignore .env)
+  psst list                      List all secrets with source annotations
   psst rm <NAME>                 Delete a secret
   psst history <NAME>            Show version history
   psst import <file|--stdin>     Import secrets from .env file
@@ -617,10 +618,17 @@ Usage:
   psst onboard-claude              Add psst instructions to CLAUDE.md
   psst <SECRET> [..] -- <cmd>    Run command with specific secrets
 
+.env Override:
+  If a .env file exists in the current directory, its non-empty values
+  override vault secrets. Use --vault-only with get to bypass .env.
+  Use -v with get to see where a value comes from.
+
 Examples:
   psst init
   psst set STRIPE_KEY
   psst import .env
+  psst get -v API_KEY                  # shows source: vault or .env
+  psst get --vault-only API_KEY        # always reads from vault
   psst STRIPE_KEY -- curl -H "Authorization: Bearer $STRIPE_KEY" https://api.stripe.com
   psst run ./deploy.sh
 EOF
