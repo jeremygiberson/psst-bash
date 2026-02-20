@@ -798,6 +798,49 @@ EOF
     assert_contains "$out" "VAULT_KEY  (vault)"
 }
 
+test_run_env_overrides_vault() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=env_value
+EOF
+    local out
+    out=$("$PSST" run bash -c 'echo $MY_KEY')
+    assert_eq "$out" "env_value"
+}
+
+test_run_env_adds_new_secrets() {
+    init_vault
+    set_secret "VAULT_KEY" "vault_val"
+    cat > .env <<'EOF'
+ENV_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" run env)
+    assert_contains "$out" "VAULT_KEY=vault_val"
+    assert_contains "$out" "ENV_KEY=env_val"
+}
+
+test_run_env_empty_no_override() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=
+EOF
+    local out
+    out=$("$PSST" run bash -c 'echo $MY_KEY')
+    assert_eq "$out" "vault_value"
+}
+
+test_run_no_env_unchanged() {
+    init_vault
+    set_secret "SECRET_A" "aaa"
+    # No .env file
+    local out
+    out=$("$PSST" run bash -c 'echo $SECRET_A')
+    assert_eq "$out" "aaa"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -911,6 +954,10 @@ run_test "list shows vault source"            test_list_shows_vault_source
 run_test "list shows env override source"     test_list_shows_env_override_source
 run_test "list shows env-only source"         test_list_shows_env_only_source
 run_test "list combined sources"              test_list_combined_sources
+run_test "run: env overrides vault"           test_run_env_overrides_vault
+run_test "run: env adds new secrets"          test_run_env_adds_new_secrets
+run_test "run: empty env no override"         test_run_env_empty_no_override
+run_test "run: no env file unchanged"         test_run_no_env_unchanged
 echo ""
 
 echo "════════════════════════════════════════"

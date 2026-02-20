@@ -483,21 +483,43 @@ cmd_export() {
 
 cmd_run() {
     need_vault
-    if [[ ! -d "$SECRETS_DIR" ]] || [[ -z "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
-        die "no secrets in vault"
-    fi
 
     [[ $# -gt 0 ]] || die "usage: psst run <command>"
 
-    # Build env vars from all secrets
+    _load_env_file
+
+    # Build env vars: start with vault secrets
     local -a env_args=()
-    for f in "$SECRETS_DIR"/*; do
-        local name
-        name=$(basename "$f")
-        local value
-        value=$(_get_current "$name")
-        env_args+=("${name}=${value}")
-    done
+    local vault_names=""
+    if [[ -d "$SECRETS_DIR" ]] && [[ -n "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+        for f in "$SECRETS_DIR"/*; do
+            local name
+            name=$(basename "$f")
+            vault_names="${vault_names}${name}"$'\n'
+            local value
+            # Use _resolve_secret to get .env override if present
+            value=$(_resolve_secret "$name")
+            env_args+=("${name}=${value}")
+        done
+    fi
+
+    # Add .env-only entries (not in vault)
+    if [[ -n "$_ENV_OVERRIDES" ]]; then
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            local env_name="${entry%%=*}"
+            local env_value="${entry#*=}"
+            [[ -n "$env_value" ]] || continue
+            # Skip if already handled from vault
+            if ! echo "$vault_names" | grep -qx "$env_name"; then
+                env_args+=("${env_name}=${env_value}")
+            fi
+        done <<< "$_ENV_OVERRIDES"
+    fi
+
+    if [[ ${#env_args[@]} -eq 0 ]]; then
+        die "no secrets in vault or .env"
+    fi
 
     env "${env_args[@]}" "$@"
 }
