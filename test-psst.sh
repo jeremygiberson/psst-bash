@@ -604,6 +604,39 @@ test_missing_ssh_key_fails() {
     assert_contains "$out" "not found"
 }
 
+test_onboard_claude_creates_new() {
+    # Should create CLAUDE.md when it doesn't exist
+    local out
+    out=$("$PSST" onboard-claude 2>&1)
+    [[ -f "CLAUDE.md" ]]
+    assert_contains "$(cat CLAUDE.md)" "Secret Management (psst)"
+    assert_contains "$(cat CLAUDE.md)" "psst SECRET -- command"
+    assert_contains "$(cat CLAUDE.md)" "NEVER read secret values"
+    assert_contains "$out" "created CLAUDE.md"
+}
+
+test_onboard_claude_already_has_psst() {
+    # Should detect existing psst instructions and skip
+    "$PSST" onboard-claude 2>/dev/null
+    local out
+    out=$("$PSST" onboard-claude 2>&1)
+    assert_contains "$out" "already contains"
+}
+
+test_onboard_claude_appends_fallback() {
+    # When CLAUDE.md exists and claude CLI is not available,
+    # should append with separator
+    echo "# My Project" > CLAUDE.md
+    echo "" >> CLAUDE.md
+    echo "Some existing instructions." >> CLAUDE.md
+    # Use PATH manipulation to ensure 'claude' is not found
+    local out
+    out=$(PATH="/usr/bin:/bin" "$PSST" onboard-claude 2>&1)
+    assert_contains "$(cat CLAUDE.md)" "# My Project"
+    assert_contains "$(cat CLAUDE.md)" "Some existing instructions."
+    assert_contains "$(cat CLAUDE.md)" "Secret Management (psst)"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -694,8 +727,14 @@ run_test "equals signs in value"            test_equals_in_value
 run_test "escaped content preserved"        test_escaped_content
 run_test "key stored in ~/.ssh"             test_key_stored_in_ssh_dir
 run_test "missing ssh key fails"            test_missing_ssh_key_fails
-
 echo ""
+
+echo "onboard-claude"
+run_test "creates CLAUDE.md when missing"     test_onboard_claude_creates_new
+run_test "skips if psst already present"      test_onboard_claude_already_has_psst
+run_test "appends when claude CLI missing"    test_onboard_claude_appends_fallback
+echo ""
+
 echo "════════════════════════════════════════"
 echo "$PASS passed, $FAIL failed (of $((PASS + FAIL)))"
 

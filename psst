@@ -396,6 +396,46 @@ cmd_exec_with_secrets() {
     env "${env_args[@]}" "${cmd_args[@]}"
 }
 
+cmd_onboard_claude() {
+    local claude_md="CLAUDE.md"
+    local instructions
+    instructions=$(_claude_instructions)
+
+    # Case 1: No CLAUDE.md — create it directly
+    if [[ ! -f "$claude_md" ]]; then
+        printf '%s\n' "$instructions" > "$claude_md"
+        info "created $claude_md with psst instructions"
+        return 0
+    fi
+
+    # Check if psst instructions already present
+    if grep -q "Secret Management (psst)" "$claude_md" 2>/dev/null; then
+        info "$claude_md already contains psst instructions"
+        return 0
+    fi
+
+    # Case 2: CLAUDE.md exists — try Claude CLI for smart merge
+    if command -v claude &>/dev/null; then
+        info "using Claude to integrate psst instructions into existing $claude_md"
+        claude -p "Below are instructions for using the psst command. Please integrate these instructions (unmodified) directly into the existing @$claude_md file where the instructions make the most sense contextually within the document.
+
+<psst-instructions>
+${instructions}
+</psst-instructions>"
+        info "psst instructions integrated into $claude_md"
+        return 0
+    fi
+
+    # Case 3: Fallback — append with separator
+    {
+        echo ""
+        echo "---"
+        echo ""
+        printf '%s\n' "$instructions"
+    } >> "$claude_md"
+    info "claude CLI not found. Instructions appended to end of $claude_md — you may want to reorganize."
+}
+
 cmd_help() {
     cat <<'EOF'
 psst - local secret manager for AI agent workflows
@@ -437,6 +477,7 @@ main() {
         import)  shift; cmd_import "$@" ;;
         export)  shift; cmd_export "$@" ;;
         run)     shift; cmd_run "$@" ;;
+        onboard-claude) shift; cmd_onboard_claude "$@" ;;
         help|-h|--help) cmd_help ;;
         *)
             # Check if args contain "--" → secret injection mode
