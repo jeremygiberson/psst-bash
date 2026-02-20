@@ -645,6 +645,23 @@ test_onboard_claude_appends_fallback() {
     assert_contains "$out" "appended"
 }
 
+test_import_still_works_after_refactor() {
+    init_vault
+    cat > test.env <<'EOF'
+# comment
+export KEY_ONE="value1"
+KEY_TWO='value2'
+KEY_THREE=value3
+
+EOF
+    local out
+    out=$("$PSST" import test.env 2>&1)
+    assert_contains "$out" "imported 3"
+    assert_eq "$("$PSST" get KEY_ONE)" "value1"
+    assert_eq "$("$PSST" get KEY_TWO)" "value2"
+    assert_eq "$("$PSST" get KEY_THREE)" "value3"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -699,6 +716,7 @@ run_test "strips export prefix"             test_import_export_prefix
 run_test "skips comments and blank lines"   test_import_skips_comments
 run_test "from stdin"                       test_import_stdin
 run_test "missing file fails"               test_import_missing_file
+run_test "import works after refactor"      test_import_still_works_after_refactor
 echo ""
 
 echo "export"

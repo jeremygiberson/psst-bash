@@ -66,6 +66,37 @@ _valid_name() {
     [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid secret name '$1' (use letters, digits, underscores)"
 }
 
+# Parse a single .env line, outputting "name=value" to stdout.
+# Returns 1 if line should be skipped (comment, blank, invalid).
+_parse_env_line() {
+    local line="$1"
+
+    # Skip comments and blank lines
+    [[ -z "$line" ]] && return 1
+    [[ "$line" =~ ^[[:space:]]*# ]] && return 1
+
+    # Strip optional 'export ' prefix
+    line="${line#export }"
+
+    # Split on first '='
+    local name="${line%%=*}"
+    local value="${line#*=}"
+
+    # Strip surrounding quotes from value
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+
+    # Trim whitespace from name
+    name=$(echo "$name" | xargs)
+
+    [[ -n "$name" ]] && [[ -n "$value" ]] || return 1
+    _valid_name "$name" 2>/dev/null || return 1
+
+    printf '%s=%s\n' "$name" "$value"
+}
+
 # Read the current (last) value for a secret
 _get_current() {
     local file
@@ -290,28 +321,10 @@ cmd_import() {
 
     local count=0
     while IFS= read -r line; do
-        # Skip comments and blank lines
-        [[ -z "$line" ]] && continue
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-
-        # Strip optional 'export ' prefix
-        line="${line#export }"
-
-        # Split on first '='
-        local name="${line%%=*}"
-        local value="${line#*=}"
-
-        # Strip surrounding quotes from value
-        value="${value#\"}"
-        value="${value%\"}"
-        value="${value#\'}"
-        value="${value%\'}"
-
-        # Trim whitespace from name
-        name=$(echo "$name" | xargs)
-
-        [[ -n "$name" ]] && [[ -n "$value" ]] || continue
-        _valid_name "$name" 2>/dev/null || continue
+        local parsed
+        parsed=$(_parse_env_line "$line") || continue
+        local name="${parsed%%=*}"
+        local value="${parsed#*=}"
 
         local file
         file=$(_secret_file "$name")
