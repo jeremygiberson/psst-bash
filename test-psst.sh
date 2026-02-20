@@ -662,6 +662,38 @@ EOF
     assert_eq "$("$PSST" get KEY_THREE)" "value3"
 }
 
+test_load_env_file_creates_overrides() {
+    init_vault
+    set_secret "VAULT_ONLY" "from_vault"
+    cat > .env <<'EOF'
+ENV_VAR=from_env
+VAULT_ONLY=from_env_override
+EOF
+    local out
+    out=$("$PSST" get VAULT_ONLY)
+    assert_eq "$out" "from_env_override"
+}
+
+test_no_env_file_no_change() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    # No .env file present
+    local out
+    out=$("$PSST" get MY_KEY)
+    assert_eq "$out" "vault_value"
+}
+
+test_empty_env_value_no_override() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=
+EOF
+    local out
+    out=$("$PSST" get MY_KEY)
+    assert_eq "$out" "vault_value"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -760,6 +792,12 @@ echo "onboard-claude"
 run_test "creates CLAUDE.md when missing"     test_onboard_claude_creates_new
 run_test "skips if psst already present"      test_onboard_claude_already_has_psst
 run_test "appends when claude CLI missing"    test_onboard_claude_appends_fallback
+echo ""
+
+echo ".env override"
+run_test "env file overrides vault"           test_load_env_file_creates_overrides
+run_test "no env file uses vault"             test_no_env_file_no_change
+run_test "empty env value no override"        test_empty_env_value_no_override
 echo ""
 
 echo "════════════════════════════════════════"

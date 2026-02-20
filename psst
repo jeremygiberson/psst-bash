@@ -97,6 +97,50 @@ _parse_env_line() {
     printf '%s=%s\n' "$name" "$value"
 }
 
+# Global variable for .env overrides (newline-delimited name=value pairs)
+_ENV_OVERRIDES=""
+
+# Load .env file from current directory into _ENV_OVERRIDES
+_load_env_file() {
+    _ENV_OVERRIDES=""
+    [[ -f ".env" ]] || return 0
+
+    local input
+    input=$(cat ".env")
+    while IFS= read -r line; do
+        local parsed
+        parsed=$(_parse_env_line "$line") || continue
+        _ENV_OVERRIDES="${_ENV_OVERRIDES}${parsed}"$'\n'
+    done <<< "$input"
+}
+
+# Look up a name in _ENV_OVERRIDES, print value if found
+_env_override_lookup() {
+    local name="$1"
+    local entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        local entry_name="${entry%%=*}"
+        if [[ "$entry_name" == "$name" ]]; then
+            printf '%s' "${entry#*=}"
+            return 0
+        fi
+    done <<< "$_ENV_OVERRIDES"
+    return 1
+}
+
+# Resolve a secret: .env overrides win over vault
+_resolve_secret() {
+    local name="$1"
+    _load_env_file
+    local override_val
+    if override_val=$(_env_override_lookup "$name") && [[ -n "$override_val" ]]; then
+        printf '%s' "$override_val"
+        return 0
+    fi
+    _get_current "$name"
+}
+
 # Read the current (last) value for a secret
 _get_current() {
     local file
@@ -233,7 +277,7 @@ cmd_get() {
     [[ -n "$name" ]] || die "usage: psst get <NAME>"
     _valid_name "$name"
     local val
-    val=$(_get_current "$name")
+    val=$(_resolve_secret "$name")
     printf '%s\n' "$val"
 }
 
