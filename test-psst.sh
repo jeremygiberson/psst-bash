@@ -635,6 +635,8 @@ test_onboard_claude_appends_fallback() {
     assert_contains "$(cat CLAUDE.md)" "# My Project"
     assert_contains "$(cat CLAUDE.md)" "Some existing instructions."
     assert_contains "$(cat CLAUDE.md)" "Secret Management (psst)"
+    assert_contains "$(cat CLAUDE.md)" "---"
+    assert_contains "$out" "appended"
 }
 
 # ── Run all tests ────────────────────────────────────────────────
