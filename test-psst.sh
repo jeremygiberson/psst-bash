@@ -841,6 +841,36 @@ test_run_no_env_unchanged() {
     assert_eq "$out" "aaa"
 }
 
+test_exec_env_overrides_specific() {
+    init_vault
+    set_secret "MY_KEY" "vault_val"
+    cat > .env <<'EOF'
+MY_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" MY_KEY -- bash -c 'echo $MY_KEY')
+    assert_eq "$out" "env_val"
+}
+
+test_exec_env_only_secret() {
+    init_vault
+    cat > .env <<'EOF'
+ENV_ONLY=env_val
+EOF
+    local out
+    out=$("$PSST" ENV_ONLY -- bash -c 'echo $ENV_ONLY')
+    assert_eq "$out" "env_val"
+}
+
+test_exec_no_env_unchanged() {
+    init_vault
+    set_secret "MY_KEY" "vault_val"
+    # No .env file
+    local out
+    out=$("$PSST" MY_KEY -- bash -c 'echo $MY_KEY')
+    assert_eq "$out" "vault_val"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -958,6 +988,9 @@ run_test "run: env overrides vault"           test_run_env_overrides_vault
 run_test "run: env adds new secrets"          test_run_env_adds_new_secrets
 run_test "run: empty env no override"         test_run_env_empty_no_override
 run_test "run: no env file unchanged"         test_run_no_env_unchanged
+run_test "exec: env overrides specific"       test_exec_env_overrides_specific
+run_test "exec: env-only secret works"        test_exec_env_only_secret
+run_test "exec: no env file unchanged"        test_exec_no_env_unchanged
 echo ""
 
 echo "════════════════════════════════════════"

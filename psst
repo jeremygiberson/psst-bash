@@ -548,11 +548,12 @@ cmd_exec_with_secrets() {
     [[ ${#cmd_args[@]} -gt 0 ]] || die "no command specified after --"
     [[ ${#secret_names[@]} -gt 0 ]] || die "no secrets specified before --"
 
+    _load_env_file
     local -a env_args=()
     for name in "${secret_names[@]}"; do
         _valid_name "$name"
         local value
-        value=$(_get_current "$name")
+        value=$(_resolve_secret "$name")
         env_args+=("${name}=${value}")
     done
 
