@@ -604,6 +604,12 @@ test_missing_ssh_key_fails() {
     assert_contains "$out" "not found"
 }
 
+test_help_shows_onboard_claude() {
+    local out
+    out=$("$PSST" help)
+    assert_contains "$out" "onboard-claude"
+}
+
 test_onboard_claude_creates_new() {
     # Should create CLAUDE.md when it doesn't exist
     local out
@@ -721,6 +727,7 @@ echo "help"
 run_test "help shows usage"                 test_help
 run_test "no args shows help"               test_no_args_shows_help
 run_test "--help flag"                      test_help_flag
+run_test "help shows onboard-claude"          test_help_shows_onboard_claude
 echo ""
 
 echo "edge cases"

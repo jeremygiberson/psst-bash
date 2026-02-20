@@ -450,6 +450,7 @@ Usage:
   psst import <file|--stdin>     Import secrets from .env file
   psst export                    Export all secrets as .env format
   psst run <command>             Run command with all secrets injected
+  psst onboard-claude              Add psst instructions to CLAUDE.md
   psst <SECRET> [..] -- <cmd>    Run command with specific secrets
 
 Examples:
