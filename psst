@@ -141,6 +141,30 @@ _resolve_secret() {
     _get_current "$name"
 }
 
+# Determine the source of a secret value
+_env_source() {
+    local name="$1"
+    _load_env_file
+    local in_env=false in_vault=false
+    local override_val
+    if override_val=$(_env_override_lookup "$name") && [[ -n "$override_val" ]]; then
+        in_env=true
+    fi
+    local file
+    file=$(_secret_file "$name")
+    if [[ -f "$file" ]]; then
+        in_vault=true
+    fi
+
+    if $in_env && $in_vault; then
+        echo ".env overrides vault"
+    elif $in_env; then
+        echo ".env"
+    else
+        echo "vault"
+    fi
+}
+
 # Read the current (last) value for a secret
 _get_current() {
     local file
@@ -273,11 +297,39 @@ cmd_set() {
 
 cmd_get() {
     need_vault
-    local name="${1:-}"
-    [[ -n "$name" ]] || die "usage: psst get <NAME>"
+    local verbose=false
+    local vault_only=false
+    local name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--verbose) verbose=true; shift ;;
+            --vault-only) vault_only=true; shift ;;
+            -*) die "unknown flag '$1'" ;;
+            *)  name="$1"; shift ;;
+        esac
+    done
+
+    [[ -n "$name" ]] || die "usage: psst get [-v] [--vault-only] <NAME>"
     _valid_name "$name"
+
     local val
-    val=$(_resolve_secret "$name")
+    if $vault_only; then
+        val=$(_get_current "$name")
+    else
+        val=$(_resolve_secret "$name")
+    fi
+
+    if $verbose; then
+        local source
+        if $vault_only; then
+            source="vault"
+        else
+            source=$(_env_source "$name")
+        fi
+        info "source: $source"
+    fi
+
     printf '%s\n' "$val"
 }
 

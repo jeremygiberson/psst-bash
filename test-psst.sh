@@ -694,6 +694,62 @@ EOF
     assert_eq "$out" "vault_value"
 }
 
+test_get_verbose_shows_vault_source() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    # No .env file
+    local out
+    out=$("$PSST" get -v MY_KEY 2>&1)
+    assert_contains "$out" "vault_value"
+    assert_contains "$out" "source: vault"
+}
+
+test_get_verbose_shows_env_source() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=env_value
+EOF
+    local out
+    out=$("$PSST" get -v MY_KEY 2>&1)
+    assert_contains "$out" "env_value"
+    assert_contains "$out" "source: .env overrides vault"
+}
+
+test_get_verbose_env_only() {
+    init_vault
+    cat > .env <<'EOF'
+ENV_ONLY=env_value
+EOF
+    local out
+    out=$("$PSST" get -v ENV_ONLY 2>&1)
+    assert_contains "$out" "env_value"
+    assert_contains "$out" "source: .env"
+}
+
+test_get_vault_only_flag() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=env_override
+EOF
+    local out
+    out=$("$PSST" get --vault-only MY_KEY)
+    assert_eq "$out" "vault_value"
+}
+
+test_get_verbose_empty_env_shows_vault() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=
+EOF
+    local out
+    out=$("$PSST" get -v MY_KEY 2>&1)
+    assert_contains "$out" "vault_value"
+    assert_contains "$out" "source: vault"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -798,6 +854,11 @@ echo ".env override"
 run_test "env file overrides vault"           test_load_env_file_creates_overrides
 run_test "no env file uses vault"             test_no_env_file_no_change
 run_test "empty env value no override"        test_empty_env_value_no_override
+run_test "get -v shows vault source"          test_get_verbose_shows_vault_source
+run_test "get -v shows env override source"   test_get_verbose_shows_env_source
+run_test "get -v shows env-only source"       test_get_verbose_env_only
+run_test "get --vault-only skips env"         test_get_vault_only_flag
+run_test "get -v empty env shows vault"       test_get_verbose_empty_env_shows_vault
 echo ""
 
 echo "════════════════════════════════════════"
