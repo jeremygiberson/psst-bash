@@ -335,21 +335,53 @@ cmd_get() {
 
 cmd_list() {
     need_vault
-    if [[ ! -d "$SECRETS_DIR" ]] || [[ -z "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+    _load_env_file
+
+    # Collect all unique secret names from vault and .env
+    local all_names=""
+
+    if [[ -d "$SECRETS_DIR" ]] && [[ -n "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+        for f in "$SECRETS_DIR"/*; do
+            local name
+            name=$(basename "$f")
+            all_names="${all_names}${name}"$'\n'
+        done
+    fi
+
+    # Add .env-only names
+    if [[ -n "$_ENV_OVERRIDES" ]]; then
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            local env_name="${entry%%=*}"
+            all_names="${all_names}${env_name}"$'\n'
+        done <<< "$_ENV_OVERRIDES"
+    fi
+
+    # Deduplicate and sort
+    local sorted
+    sorted=$(printf '%s' "$all_names" | sort -u)
+
+    if [[ -z "$sorted" ]]; then
         info "no secrets stored"
         return 0
     fi
-    for f in "$SECRETS_DIR"/*; do
-        local name
-        name=$(basename "$f")
-        local count
-        count=$(wc -l < "$f" | tr -d ' ')
-        if [[ "$count" -gt 1 ]]; then
-            echo "$name  ($count versions)"
-        else
-            echo "$name"
+
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        local source
+        source=$(_env_source "$name")
+        local file
+        file=$(_secret_file "$name")
+        local version_info=""
+        if [[ -f "$file" ]]; then
+            local count
+            count=$(wc -l < "$file" | tr -d ' ')
+            if [[ "$count" -gt 1 ]]; then
+                version_info=", $count versions"
+            fi
         fi
-    done
+        echo "$name  ($source$version_info)"
+    done <<< "$sorted"
 }
 
 cmd_rm() {

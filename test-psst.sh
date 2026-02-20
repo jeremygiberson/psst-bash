@@ -256,7 +256,7 @@ test_list_shows_names() {
     # Alphabetical: ALPHA should come first
     local first
     first=$(echo "$out" | head -1)
-    assert_eq "$first" "ALPHA"
+    assert_eq "$first" "ALPHA  (vault)"
 }
 
 test_list_version_count() {
@@ -267,8 +267,8 @@ test_list_version_count() {
 
     local out
     out=$("$PSST" list)
-    assert_contains "$out" "KEY  (2 versions)"
-    assert_not_contains "$out" "SINGLE  ("
+    assert_contains "$out" "KEY  (vault, 2 versions)"
+    assert_contains "$out" "SINGLE  (vault)"
 }
 
 test_ls_alias() {
@@ -750,6 +750,54 @@ EOF
     assert_contains "$out" "source: vault"
 }
 
+test_list_shows_vault_source() {
+    init_vault
+    set_secret "VAULT_KEY" "val"
+    # No .env file
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "VAULT_KEY"
+    assert_contains "$out" "(vault)"
+}
+
+test_list_shows_env_override_source() {
+    init_vault
+    set_secret "BOTH_KEY" "vault_val"
+    cat > .env <<'EOF'
+BOTH_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "BOTH_KEY"
+    assert_contains "$out" "(.env overrides vault)"
+}
+
+test_list_shows_env_only_source() {
+    init_vault
+    cat > .env <<'EOF'
+ENV_ONLY_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "ENV_ONLY_KEY"
+    assert_contains "$out" "(.env)"
+}
+
+test_list_combined_sources() {
+    init_vault
+    set_secret "VAULT_KEY" "v1"
+    set_secret "BOTH_KEY" "v2"
+    cat > .env <<'EOF'
+BOTH_KEY=override
+ENV_KEY=env_only
+EOF
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "BOTH_KEY  (.env overrides vault)"
+    assert_contains "$out" "ENV_KEY  (.env)"
+    assert_contains "$out" "VAULT_KEY  (vault)"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -859,6 +907,10 @@ run_test "get -v shows env override source"   test_get_verbose_shows_env_source
 run_test "get -v shows env-only source"       test_get_verbose_env_only
 run_test "get --vault-only skips env"         test_get_vault_only_flag
 run_test "get -v empty env shows vault"       test_get_verbose_empty_env_shows_vault
+run_test "list shows vault source"            test_list_shows_vault_source
+run_test "list shows env override source"     test_list_shows_env_override_source
+run_test "list shows env-only source"         test_list_shows_env_only_source
+run_test "list combined sources"              test_list_combined_sources
 echo ""
 
 echo "════════════════════════════════════════"
