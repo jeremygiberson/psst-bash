@@ -35,7 +35,7 @@ need_vault() {
 # Detect whether openssl supports -pbkdf2 (OpenSSL 1.1.1+).
 # LibreSSL on macOS does not, so we fall back gracefully.
 _openssl_kdf_flag() {
-    if echo -n "" | openssl enc -aes-256-cbc -pbkdf2 -pass pass:test -e 2>/dev/null | head -c0; then
+    if echo -n "" | openssl enc -aes-256-cbc -pbkdf2 -pass pass:test -e >/dev/null 2>&1; then
         echo "-pbkdf2"
     else
         echo ""
