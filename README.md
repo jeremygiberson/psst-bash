@@ -15,9 +15,9 @@ This project is a bash reimplementation of Michael Livashvili's [`psst`](https:/
 ## Quick start
 
 ```bash
-# Copy psst somewhere on your PATH
-cp psst /usr/local/bin/
-chmod +x /usr/local/bin/psst
+# Install psst
+curl -fsSL https://raw.githubusercontent.com/jeremygiberson/psst-bash/main/psst \
+  -o /usr/local/bin/psst && chmod +x /usr/local/bin/psst
 
 # Initialize a vault in your project
 cd your-project/
