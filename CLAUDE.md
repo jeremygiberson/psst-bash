@@ -73,3 +73,12 @@ run_test "description of test"    test_my_feature
 - OpenSSL KDF: macOS LibreSSL lacks `-pbkdf2`, detected at runtime by `_openssl_kdf_flag()`
 - `stat` permissions: `-c '%a'` on Linux, `-f '%Lp'` on macOS — tests use `stat -c ... 2>/dev/null || stat -f ...`
 - `grep` flags: avoid flags that behave differently between GNU and BSD (e.g., `-P` is GNU-only)
+
+## .env Override
+
+When a `.env` file exists in the current working directory, its non-empty values override vault secrets:
+- `psst get NAME` returns the .env value if present, vault value otherwise
+- `psst get -v NAME` shows where the value came from (stderr)
+- `psst get --vault-only NAME` ignores .env, reads vault directly
+- `psst run` and `psst SECRET -- cmd` both respect .env overrides
+- `psst list` shows source annotations: `(vault)`, `(.env)`, `(.env overrides vault)`

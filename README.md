@@ -1,16 +1,16 @@
 # psst 🤫
 
-A local secret manager for AI agent workflows — in pure bash.
+Your secrets stay out of the AI context window. Period.
 
-Secrets are encrypted at rest and injected into subprocesses at runtime, so your agent can *use* secrets without ever *seeing* them. No secret values in the context window. No secret values in terminal history. No dependencies beyond `bash` and `openssl`.
+psst keeps sensitive values — API keys, database URLs, tokens — away from AI agents. It works two ways: as a transparent shield for your existing `.env` files, and as an encrypted vault for secrets that deserve stronger protection. Pure bash, zero dependencies beyond `openssl`.
 
 ## Why this exists
 
-This project is inspired by Michael Livashvili's excellent [`psst`](https://github.com/Michaelliv/psst), which solves the same core problem: keeping secrets out of your AI agent's context. That project is a polished, feature-rich tool built on Node.js (via Bun), with keychain integration, secret tagging, environments, git hook scanning, and an agent onboarding command.
+AI coding agents are powerful, but they read everything in their context. That includes `.env` files, configuration snippets pasted into chat, and anything else in the working directory. Once a secret enters the context window, it is logged, cached, and potentially echoed back.
 
-This fork reimplements the idea as a single bash script with zero external dependencies. The motivation is simple: not every developer has Node.js installed, but every developer on macOS or Linux has `bash` and `openssl`. If you're already living in a terminal — especially when working with CLI-based agents like Claude Code — adding a Node.js dependency for secret management feels like overkill. A ~380 line shell script that uses only tools already on your system fits the workflow more naturally.
+psst eliminates that exposure. Secrets are encrypted at rest and injected into subprocesses at runtime. The agent writes commands; psst supplies the credentials. Values flow through the process environment, never through the conversation.
 
-This version intentionally omits features from the original that didn't fit the "keep it minimal" goal: OS keychain integration, environment namespacing, secret tagging, git pre-commit hooks, and output redaction. What remains is the core value proposition — encrypted local secrets, subprocess injection, append-only history — and nothing else.
+This project is a bash reimplementation of Michael Livashvili's [`psst`](https://github.com/Michaelliv/psst), which solves the same problem with a more feature-rich Node.js toolchain. This version trades those features for simplicity: a single shell script, no runtime dependencies, and identical behavior on any system with `bash` and `openssl`.
 
 ## Quick start
 
@@ -31,35 +31,38 @@ psst set DATABASE_URL
 psst import .env
 ```
 
+If your project already has a `.env` file, psst reads it automatically. No import step required — `psst run` and `psst SECRET -- cmd` resolve `.env` values on the fly.
+
 ## Usage
 
 ### For humans
 
 ```bash
-psst set <name>                 # Add/update a secret (interactive)
-psst set <name> --stdin         # Pipe a value in
-psst get <name>                 # Retrieve a value (debugging only)
-psst list                       # List all secret names
-psst rm <name>                  # Delete a secret
-psst history <name>             # Show version history with masked values
-psst import <file>              # Import from a .env file
-psst import --stdin             # Import from stdin
-psst export                     # Export all secrets in .env format
+psst init                       # Create vault in current directory
+psst set <NAME> [--stdin]       # Add or update a secret
+psst get [-v] <NAME>            # Retrieve a value (-v shows source)
+psst get --vault-only <NAME>    # Retrieve from vault, ignoring .env
+psst list                       # List all secrets with source annotations
+psst rm <NAME>                  # Delete a secret
+psst history <NAME>             # Show version history with masked values
+psst import <file|--stdin>      # Import secrets from .env format
+psst export                     # Export all vault secrets as .env format
+psst onboard-claude             # Add psst instructions to CLAUDE.md
 ```
 
 ### For agents
 
-Agents don't read secrets — they use them:
+Agents do not read secrets. They use them:
 
 ```bash
 # Inject specific secrets into a command
 psst STRIPE_KEY -- curl -H "Authorization: Bearer $STRIPE_KEY" https://api.stripe.com/v1/charges
 
-# Inject all vault secrets into a command
+# Inject all secrets (vault + .env) into a command
 psst run ./deploy.sh
 ```
 
-The agent writes the command. `psst` handles the secrets. The subprocess gets the real values; the agent only sees stdout/stderr and the exit code.
+The agent writes the command. psst handles the secrets. The subprocess receives the real values; the agent sees only stdout/stderr and the exit code.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -75,12 +78,37 @@ The agent writes the command. `psst` handles the secrets. The subprocess gets th
 ┌─────────────────────────────────────────────┐
 │ psst                                        │
 │                                             │
-│ 1. Decrypt STRIPE_KEY from .psst/secrets/   │
+│ 1. Resolve STRIPE_KEY (.env or vault)       │
 │ 2. Inject into subprocess environment       │
 │ 3. Execute the command                      │
 │ 4. Return exit code                         │
 └─────────────────────────────────────────────┘
 ```
+
+### .env override
+
+If a `.env` file exists in the current directory, psst reads it automatically. Values from `.env` take precedence over vault secrets of the same name. No configuration needed — every resolution path (`psst run`, `psst SECRET -- cmd`, `psst get`) respects this layering.
+
+Use `psst list` to see where each secret comes from:
+
+```
+$ psst list
+API_KEY       (.env overrides vault)
+DB_URL        (vault)
+LOCAL_TOKEN   (.env)
+```
+
+Use `psst get -v` to check the source of a specific secret:
+
+```
+$ psst get -v API_KEY
+psst: source: .env overrides vault
+sk_live_abc123...
+```
+
+Use `psst get --vault-only` to bypass `.env` and read directly from the vault.
+
+This layering lets you keep a `.env` file for local development while the vault holds production or shared credentials. psst ensures neither source leaks into the agent's context.
 
 ### Secret history
 
@@ -96,7 +124,7 @@ History for STRIPE_KEY (3 version(s)):
   current     2026-02-20T11:00:00Z  sk_l**************
 ```
 
-Values are masked in the output (first 4 characters visible). The full history lives in `.psst/secrets/STRIPE_KEY` as a simple append-only text file — one `timestamp<tab>encrypted_blob` per line. You can inspect or trim it manually if needed.
+Values are masked in the output (first 4 characters visible). The full history lives in `.psst/secrets/STRIPE_KEY` as an append-only text file — one `timestamp<tab>encrypted_blob` per line. You can inspect or trim it manually if needed.
 
 ## How it works
 
@@ -115,32 +143,27 @@ Each project gets a `.psst/` directory:
 
 Secrets are encrypted with AES-256-CBC via `openssl`. Each project gets its own random 256-bit encryption key, stored in `~/.ssh/` alongside your SSH keys — not in the project directory. The `.psst/.key` file is just a pointer containing the key's filename, never the key material itself.
 
-This means the encryption key is never at risk of being committed to git, read by an AI agent browsing project files, or exposed in a directory listing of your project. It has the same security posture as your SSH keys.
+When a `.env` file is present, psst layers it on top of the vault. The resolution order is: `.env` wins over vault. This happens transparently during `get`, `run`, and selective injection (`SECRET -- cmd`).
 
-Each secret is stored as a timestamped, encrypted line — the latest line is the current value, older lines are history.
-
-`psst init` will add `.psst/` to your `.gitignore` automatically if you're in a git repository.
+`psst init` adds `.psst/` to your `.gitignore` automatically. The `onboard-claude` command patches `.claude/settings.json` to deny read access to `.env`, `.env.*`, and `.psst/**` — defense-in-depth that prevents the agent from reading secret files directly, even if it tries.
 
 ### Security model
 
-This is a practical tool, not a vault. The threat model is narrowly scoped:
+The threat model is narrowly scoped: keep secrets out of AI agent context windows, terminal history, and version control.
 
-**What it prevents:** secrets appearing in agent context windows, terminal history, `.env` files checked into git, and subprocess stdout. The encryption key lives in `~/.ssh/`, not in the project directory, so it can't be accidentally committed or read by an agent browsing your project files.
+**What it prevents:** secrets appearing in agent context, terminal scrollback, `.env` files committed to git, and subprocess stdout. The encryption key lives in `~/.ssh/`, not in the project directory, so it cannot be accidentally committed or read by an agent browsing project files. The `onboard-claude` command adds file-read restrictions to `.claude/settings.json`, blocking direct access to `.env` and `.psst/` even if the agent attempts it.
 
 **What it doesn't prevent:** anyone with access to both `~/.ssh/.psst_*` and `.psst/secrets/` can decrypt your secrets. This is the same trust boundary as SSH keys — if an attacker has read access to your home directory, you have bigger problems.
 
-**No keychain dependency** means there's no OS-level unlock gate on the encryption key. The tradeoff is simplicity and portability: the tool works identically on any system with bash and openssl, including headless CI runners, containers, and SSH sessions.
+**No keychain dependency** means there is no OS-level unlock gate on the encryption key. The tradeoff is simplicity and portability: the tool works identically on any system with bash and openssl, including headless CI runners, containers, and SSH sessions.
 
 ## Testing
 
-The project includes a test suite with 53 cases covering all commands and edge cases.
+The project includes 85 tests covering all commands, `.env` override behavior, and edge cases.
 
 ```bash
 # Run with the included bash test runner (zero dependencies)
 bash test-psst.sh
-
-# Or with bats-core if available
-bats test/psst.bats
 ```
 
 Tests are fully isolated — each test runs in its own temporary directory and cleans up after itself.

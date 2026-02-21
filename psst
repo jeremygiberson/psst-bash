@@ -66,6 +66,105 @@ _valid_name() {
     [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid secret name '$1' (use letters, digits, underscores)"
 }
 
+# Parse a single .env line, outputting "name=value" to stdout.
+# Returns 1 if line should be skipped (comment, blank, invalid).
+_parse_env_line() {
+    local line="$1"
+
+    # Skip comments and blank lines
+    [[ -z "$line" ]] && return 1
+    [[ "$line" =~ ^[[:space:]]*# ]] && return 1
+
+    # Strip optional 'export ' prefix
+    line="${line#export }"
+
+    # Split on first '='
+    local name="${line%%=*}"
+    local value="${line#*=}"
+
+    # Strip surrounding quotes from value
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+
+    # Trim whitespace from name
+    name=$(echo "$name" | xargs)
+
+    [[ -n "$name" ]] && [[ -n "$value" ]] || return 1
+    _valid_name "$name" 2>/dev/null || return 1
+
+    printf '%s=%s\n' "$name" "$value"
+}
+
+# Global variable for .env overrides (newline-delimited name=value pairs)
+_ENV_OVERRIDES=""
+
+# Load .env file from current directory into _ENV_OVERRIDES
+_load_env_file() {
+    _ENV_OVERRIDES=""
+    [[ -f ".env" ]] || return 0
+
+    local input
+    input=$(cat ".env")
+    while IFS= read -r line; do
+        local parsed
+        parsed=$(_parse_env_line "$line") || continue
+        _ENV_OVERRIDES="${_ENV_OVERRIDES}${parsed}"$'\n'
+    done <<< "$input"
+}
+
+# Look up a name in _ENV_OVERRIDES, print value if found
+_env_override_lookup() {
+    local name="$1"
+    local entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        local entry_name="${entry%%=*}"
+        if [[ "$entry_name" == "$name" ]]; then
+            printf '%s' "${entry#*=}"
+            return 0
+        fi
+    done <<< "$_ENV_OVERRIDES"
+    return 1
+}
+
+# Resolve a secret: .env overrides win over vault
+_resolve_secret() {
+    local name="$1"
+    _load_env_file
+    local override_val
+    if override_val=$(_env_override_lookup "$name") && [[ -n "$override_val" ]]; then
+        printf '%s' "$override_val"
+        return 0
+    fi
+    _get_current "$name"
+}
+
+# Determine the source of a secret value
+_env_source() {
+    local name="$1"
+    _load_env_file
+    local in_env=false in_vault=false
+    local override_val
+    if override_val=$(_env_override_lookup "$name") && [[ -n "$override_val" ]]; then
+        in_env=true
+    fi
+    local file
+    file=$(_secret_file "$name")
+    if [[ -f "$file" ]]; then
+        in_vault=true
+    fi
+
+    if $in_env && $in_vault; then
+        echo ".env overrides vault"
+    elif $in_env; then
+        echo ".env"
+    else
+        echo "vault"
+    fi
+}
+
 # Read the current (last) value for a secret
 _get_current() {
     local file
@@ -82,15 +181,27 @@ _claude_instructions() {
     cat <<'CLAUDE_EOF'
 # Secret Management (psst)
 
-This project uses `psst` for secrets. Secrets are encrypted at rest and injected into subprocesses at runtime — they never appear in your context.
+This project uses `psst` for secrets. Secrets are encrypted at rest and injected into subprocesses at runtime — they never appear in your context. If the project has a `.env` file, psst reads it automatically so those values stay out of your context too.
 
 ## Usage
 
 ```bash
 psst SECRET -- command                  # inject one secret
 psst SECRET_A SECRET_B -- command       # inject multiple
-psst run command                        # inject all vault secrets
-psst list                               # see available secrets
+psst run command                        # inject all secrets (.env + vault)
+psst list                               # see available secrets and their source
+psst get -v NAME                        # check where a value comes from
+```
+
+## .env Override
+
+If a `.env` file exists in the current directory, its non-empty values override vault secrets automatically. You don't need to do anything special — `psst run`, `psst SECRET -- cmd`, and `psst get` all respect `.env` overrides.
+
+Use `psst list` to see where each secret comes from:
+```
+API_KEY       (.env overrides vault)
+DB_URL        (vault)
+LOCAL_TOKEN   (.env)
 ```
 
 ## Examples
@@ -111,11 +222,108 @@ The `--` syntax splits args by shell rules. Pipes, semicolons, and multi-stateme
 ## Rules
 
 - NEVER read secret values — no `psst get`, no `cat .psst/`, no `cat ~/.ssh/.psst_*`
+- NEVER read `.env` files directly — psst handles `.env` for you
 - NEVER ask the user to paste secrets into the conversation
 - ALWAYS use `psst SECRET -- command` or `psst run command`
 - If a secret is missing, tell the user: "Please run `psst set SECRET_NAME` to add it."
 - If you're unsure what secrets exist, run `psst list`
 CLAUDE_EOF
+}
+
+# Patch .claude/settings.json with deny rules for sensitive files
+_patch_claude_settings() {
+    local settings_dir=".claude"
+    local settings_file="$settings_dir/settings.json"
+
+    mkdir -p "$settings_dir"
+
+    # Idempotent: skip if already patched
+    if [[ -f "$settings_file" ]] && grep -q 'Read(.psst/\*\*)' "$settings_file" 2>/dev/null; then
+        return 0
+    fi
+
+    local deny_rules
+    deny_rules='"Read(.env)", "Read(.env.*)", "Read(.psst/**)"'
+
+    if [[ ! -f "$settings_file" ]]; then
+        # No settings file — create fresh
+        cat > "$settings_file" <<EOF
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(.psst/**)"
+    ]
+  }
+}
+EOF
+    elif grep -q '"deny"' "$settings_file" 2>/dev/null; then
+        # Has a deny array — append our rules before the closing bracket
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            /\"deny\"/ { in_deny=1 }
+            in_deny && /\]/ {
+                # Add comma after last existing item, then our new rules
+                sub(/\]/, ",\n      \"Read(.env)\",\n      \"Read(.env.*)\",\n      \"Read(.psst/**)\"\n    ]")
+                in_deny=0
+            }
+            { print }
+        ' "$settings_file" > "$tmp"
+        mv "$tmp" "$settings_file"
+    elif grep -q '"permissions"' "$settings_file" 2>/dev/null; then
+        # Has permissions but no deny — add deny array after permissions opening brace
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            /\"permissions\"/ { in_perm=1 }
+            in_perm && /{/ {
+                print
+                print "    \"deny\": ["
+                print "      \"Read(.env)\","
+                print "      \"Read(.env.*)\","
+                print "      \"Read(.psst/**)\""
+                print "    ],"
+                in_perm=0
+                next
+            }
+            { print }
+        ' "$settings_file" > "$tmp"
+        mv "$tmp" "$settings_file"
+    else
+        # No permissions block at all — add it before the closing brace
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            # Find the last } and insert permissions before it
+            { lines[NR] = $0 }
+            END {
+                # Print all lines except the last (closing brace)
+                # Add comma to the last content line before the closing brace
+                for (i = 1; i < NR; i++) {
+                    if (i == NR - 1) {
+                        # Add trailing comma to last content line
+                        sub(/[[:space:]]*$/, ",", lines[i])
+                        print lines[i]
+                    } else {
+                        print lines[i]
+                    }
+                }
+                print "  \"permissions\": {"
+                print "    \"deny\": ["
+                print "      \"Read(.env)\","
+                print "      \"Read(.env.*)\","
+                print "      \"Read(.psst/**)\""
+                print "    ]"
+                print "  }"
+                print "}"
+            }
+        ' "$settings_file" > "$tmp"
+        mv "$tmp" "$settings_file"
+    fi
+
+    info "added file restrictions to .claude/settings.json (defense-in-depth)"
 }
 
 # ── Commands ─────────────────────────────────────────────────────
@@ -198,31 +406,91 @@ cmd_set() {
 
 cmd_get() {
     need_vault
-    local name="${1:-}"
-    [[ -n "$name" ]] || die "usage: psst get <NAME>"
+    local verbose=false
+    local vault_only=false
+    local name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--verbose) verbose=true; shift ;;
+            --vault-only) vault_only=true; shift ;;
+            -*) die "unknown flag '$1'" ;;
+            *)  name="$1"; shift ;;
+        esac
+    done
+
+    [[ -n "$name" ]] || die "usage: psst get [-v] [--vault-only] <NAME>"
     _valid_name "$name"
+
     local val
-    val=$(_get_current "$name")
+    if $vault_only; then
+        val=$(_get_current "$name")
+    else
+        val=$(_resolve_secret "$name")
+    fi
+
+    if $verbose; then
+        local source
+        if $vault_only; then
+            source="vault"
+        else
+            source=$(_env_source "$name")
+        fi
+        info "source: $source"
+    fi
+
     printf '%s\n' "$val"
 }
 
 cmd_list() {
     need_vault
-    if [[ ! -d "$SECRETS_DIR" ]] || [[ -z "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+    _load_env_file
+
+    # Collect all unique secret names from vault and .env
+    local all_names=""
+
+    if [[ -d "$SECRETS_DIR" ]] && [[ -n "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+        for f in "$SECRETS_DIR"/*; do
+            local name
+            name=$(basename "$f")
+            all_names="${all_names}${name}"$'\n'
+        done
+    fi
+
+    # Add .env-only names
+    if [[ -n "$_ENV_OVERRIDES" ]]; then
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            local env_name="${entry%%=*}"
+            all_names="${all_names}${env_name}"$'\n'
+        done <<< "$_ENV_OVERRIDES"
+    fi
+
+    # Deduplicate and sort
+    local sorted
+    sorted=$(printf '%s' "$all_names" | sort -u)
+
+    if [[ -z "$sorted" ]]; then
         info "no secrets stored"
         return 0
     fi
-    for f in "$SECRETS_DIR"/*; do
-        local name
-        name=$(basename "$f")
-        local count
-        count=$(wc -l < "$f" | tr -d ' ')
-        if [[ "$count" -gt 1 ]]; then
-            echo "$name  ($count versions)"
-        else
-            echo "$name"
+
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        local source
+        source=$(_env_source "$name")
+        local file
+        file=$(_secret_file "$name")
+        local version_info=""
+        if [[ -f "$file" ]]; then
+            local count
+            count=$(wc -l < "$file" | tr -d ' ')
+            if [[ "$count" -gt 1 ]]; then
+                version_info=", $count versions"
+            fi
         fi
-    done
+        echo "$name  ($source$version_info)"
+    done <<< "$sorted"
 }
 
 cmd_rm() {
@@ -290,28 +558,10 @@ cmd_import() {
 
     local count=0
     while IFS= read -r line; do
-        # Skip comments and blank lines
-        [[ -z "$line" ]] && continue
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-
-        # Strip optional 'export ' prefix
-        line="${line#export }"
-
-        # Split on first '='
-        local name="${line%%=*}"
-        local value="${line#*=}"
-
-        # Strip surrounding quotes from value
-        value="${value#\"}"
-        value="${value%\"}"
-        value="${value#\'}"
-        value="${value%\'}"
-
-        # Trim whitespace from name
-        name=$(echo "$name" | xargs)
-
-        [[ -n "$name" ]] && [[ -n "$value" ]] || continue
-        _valid_name "$name" 2>/dev/null || continue
+        local parsed
+        parsed=$(_parse_env_line "$line") || continue
+        local name="${parsed%%=*}"
+        local value="${parsed#*=}"
 
         local file
         file=$(_secret_file "$name")
@@ -342,21 +592,43 @@ cmd_export() {
 
 cmd_run() {
     need_vault
-    if [[ ! -d "$SECRETS_DIR" ]] || [[ -z "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
-        die "no secrets in vault"
-    fi
 
     [[ $# -gt 0 ]] || die "usage: psst run <command>"
 
-    # Build env vars from all secrets
+    _load_env_file
+
+    # Build env vars: start with vault secrets
     local -a env_args=()
-    for f in "$SECRETS_DIR"/*; do
-        local name
-        name=$(basename "$f")
-        local value
-        value=$(_get_current "$name")
-        env_args+=("${name}=${value}")
-    done
+    local vault_names=""
+    if [[ -d "$SECRETS_DIR" ]] && [[ -n "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]]; then
+        for f in "$SECRETS_DIR"/*; do
+            local name
+            name=$(basename "$f")
+            vault_names="${vault_names}${name}"$'\n'
+            local value
+            # Use _resolve_secret to get .env override if present
+            value=$(_resolve_secret "$name")
+            env_args+=("${name}=${value}")
+        done
+    fi
+
+    # Add .env-only entries (not in vault)
+    if [[ -n "$_ENV_OVERRIDES" ]]; then
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            local env_name="${entry%%=*}"
+            local env_value="${entry#*=}"
+            [[ -n "$env_value" ]] || continue
+            # Skip if already handled from vault
+            if ! echo "$vault_names" | grep -qx "$env_name"; then
+                env_args+=("${env_name}=${env_value}")
+            fi
+        done <<< "$_ENV_OVERRIDES"
+    fi
+
+    if [[ ${#env_args[@]} -eq 0 ]]; then
+        die "no secrets in vault or .env"
+    fi
 
     env "${env_args[@]}" "$@"
 }
@@ -385,11 +657,12 @@ cmd_exec_with_secrets() {
     [[ ${#cmd_args[@]} -gt 0 ]] || die "no command specified after --"
     [[ ${#secret_names[@]} -gt 0 ]] || die "no secrets specified before --"
 
+    _load_env_file
     local -a env_args=()
     for name in "${secret_names[@]}"; do
         _valid_name "$name"
         local value
-        value=$(_get_current "$name")
+        value=$(_resolve_secret "$name")
         env_args+=("${name}=${value}")
     done
 
@@ -405,17 +678,13 @@ cmd_onboard_claude() {
     if [[ ! -f "$claude_md" ]]; then
         printf '%s\n' "$instructions" > "$claude_md"
         info "created $claude_md with psst instructions"
-        return 0
-    fi
 
     # Check if psst instructions already present
-    if grep -q "Secret Management (psst)" "$claude_md" 2>/dev/null; then
+    elif grep -q "Secret Management (psst)" "$claude_md" 2>/dev/null; then
         info "$claude_md already contains psst instructions"
-        return 0
-    fi
 
     # Case 2: CLAUDE.md exists — try Claude CLI for smart merge
-    if command -v claude &>/dev/null; then
+    elif command -v claude &>/dev/null; then
         info "using Claude to integrate psst instructions into existing $claude_md"
         claude -p "Below are instructions for using the psst command. Please integrate these instructions (unmodified) directly into the existing @$claude_md file where the instructions make the most sense contextually within the document.
 
@@ -423,17 +692,19 @@ cmd_onboard_claude() {
 ${instructions}
 </psst-instructions>"
         info "psst instructions integrated into $claude_md"
-        return 0
-    fi
 
     # Case 3: Fallback — append with separator
-    {
-        echo ""
-        echo "---"
-        echo ""
-        printf '%s\n' "$instructions"
-    } >> "$claude_md"
-    info "claude CLI not found. Instructions appended to end of $claude_md — you may want to reorganize."
+    else
+        {
+            echo ""
+            echo "---"
+            echo ""
+            printf '%s\n' "$instructions"
+        } >> "$claude_md"
+        info "claude CLI not found. Instructions appended to end of $claude_md — you may want to reorganize."
+    fi
+
+    _patch_claude_settings
 }
 
 cmd_help() {
@@ -443,8 +714,9 @@ psst - local secret manager for AI agent workflows
 Usage:
   psst init                      Create vault in current directory
   psst set <NAME> [--stdin]      Add or update a secret
-  psst get <NAME>                Retrieve a secret value
-  psst list                      List all secrets
+  psst get [-v] <NAME>           Retrieve a secret value
+  psst get --vault-only <NAME>   Retrieve value from vault (ignore .env)
+  psst list                      List all secrets with source annotations
   psst rm <NAME>                 Delete a secret
   psst history <NAME>            Show version history
   psst import <file|--stdin>     Import secrets from .env file
@@ -453,10 +725,17 @@ Usage:
   psst onboard-claude              Add psst instructions to CLAUDE.md
   psst <SECRET> [..] -- <cmd>    Run command with specific secrets
 
+.env Override:
+  If a .env file exists in the current directory, its non-empty values
+  override vault secrets. Use --vault-only with get to bypass .env.
+  Use -v with get to see where a value comes from.
+
 Examples:
   psst init
   psst set STRIPE_KEY
   psst import .env
+  psst get -v API_KEY                  # shows source: vault or .env
+  psst get --vault-only API_KEY        # always reads from vault
   psst STRIPE_KEY -- curl -H "Authorization: Bearer $STRIPE_KEY" https://api.stripe.com
   psst run ./deploy.sh
 EOF

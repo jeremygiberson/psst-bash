@@ -256,7 +256,7 @@ test_list_shows_names() {
     # Alphabetical: ALPHA should come first
     local first
     first=$(echo "$out" | head -1)
-    assert_eq "$first" "ALPHA"
+    assert_eq "$first" "ALPHA  (vault)"
 }
 
 test_list_version_count() {
@@ -267,8 +267,8 @@ test_list_version_count() {
 
     local out
     out=$("$PSST" list)
-    assert_contains "$out" "KEY  (2 versions)"
-    assert_not_contains "$out" "SINGLE  ("
+    assert_contains "$out" "KEY  (vault, 2 versions)"
+    assert_contains "$out" "SINGLE  (vault)"
 }
 
 test_ls_alias() {
@@ -645,6 +645,334 @@ test_onboard_claude_appends_fallback() {
     assert_contains "$out" "appended"
 }
 
+test_import_still_works_after_refactor() {
+    init_vault
+    cat > test.env <<'EOF'
+# comment
+export KEY_ONE="value1"
+KEY_TWO='value2'
+KEY_THREE=value3
+
+EOF
+    local out
+    out=$("$PSST" import test.env 2>&1)
+    assert_contains "$out" "imported 3"
+    assert_eq "$("$PSST" get KEY_ONE)" "value1"
+    assert_eq "$("$PSST" get KEY_TWO)" "value2"
+    assert_eq "$("$PSST" get KEY_THREE)" "value3"
+}
+
+test_load_env_file_creates_overrides() {
+    init_vault
+    set_secret "VAULT_ONLY" "from_vault"
+    cat > .env <<'EOF'
+ENV_VAR=from_env
+VAULT_ONLY=from_env_override
+EOF
+    local out
+    out=$("$PSST" get VAULT_ONLY)
+    assert_eq "$out" "from_env_override"
+}
+
+test_no_env_file_no_change() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    # No .env file present
+    local out
+    out=$("$PSST" get MY_KEY)
+    assert_eq "$out" "vault_value"
+}
+
+test_empty_env_value_no_override() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=
+EOF
+    local out
+    out=$("$PSST" get MY_KEY)
+    assert_eq "$out" "vault_value"
+}
+
+test_get_verbose_shows_vault_source() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    # No .env file
+    local out
+    out=$("$PSST" get -v MY_KEY 2>&1)
+    assert_contains "$out" "vault_value"
+    assert_contains "$out" "source: vault"
+}
+
+test_get_verbose_shows_env_source() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=env_value
+EOF
+    local out
+    out=$("$PSST" get -v MY_KEY 2>&1)
+    assert_contains "$out" "env_value"
+    assert_contains "$out" "source: .env overrides vault"
+}
+
+test_get_verbose_env_only() {
+    init_vault
+    cat > .env <<'EOF'
+ENV_ONLY=env_value
+EOF
+    local out
+    out=$("$PSST" get -v ENV_ONLY 2>&1)
+    assert_contains "$out" "env_value"
+    assert_contains "$out" "source: .env"
+}
+
+test_get_vault_only_flag() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=env_override
+EOF
+    local out
+    out=$("$PSST" get --vault-only MY_KEY)
+    assert_eq "$out" "vault_value"
+}
+
+test_get_verbose_empty_env_shows_vault() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=
+EOF
+    local out
+    out=$("$PSST" get -v MY_KEY 2>&1)
+    assert_contains "$out" "vault_value"
+    assert_contains "$out" "source: vault"
+}
+
+test_list_shows_vault_source() {
+    init_vault
+    set_secret "VAULT_KEY" "val"
+    # No .env file
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "VAULT_KEY"
+    assert_contains "$out" "(vault)"
+}
+
+test_list_shows_env_override_source() {
+    init_vault
+    set_secret "BOTH_KEY" "vault_val"
+    cat > .env <<'EOF'
+BOTH_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "BOTH_KEY"
+    assert_contains "$out" "(.env overrides vault)"
+}
+
+test_list_shows_env_only_source() {
+    init_vault
+    cat > .env <<'EOF'
+ENV_ONLY_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "ENV_ONLY_KEY"
+    assert_contains "$out" "(.env)"
+}
+
+test_list_combined_sources() {
+    init_vault
+    set_secret "VAULT_KEY" "v1"
+    set_secret "BOTH_KEY" "v2"
+    cat > .env <<'EOF'
+BOTH_KEY=override
+ENV_KEY=env_only
+EOF
+    local out
+    out=$("$PSST" list)
+    assert_contains "$out" "BOTH_KEY  (.env overrides vault)"
+    assert_contains "$out" "ENV_KEY  (.env)"
+    assert_contains "$out" "VAULT_KEY  (vault)"
+}
+
+test_run_env_overrides_vault() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=env_value
+EOF
+    local out
+    out=$("$PSST" run bash -c 'echo $MY_KEY')
+    assert_eq "$out" "env_value"
+}
+
+test_run_env_adds_new_secrets() {
+    init_vault
+    set_secret "VAULT_KEY" "vault_val"
+    cat > .env <<'EOF'
+ENV_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" run env)
+    assert_contains "$out" "VAULT_KEY=vault_val"
+    assert_contains "$out" "ENV_KEY=env_val"
+}
+
+test_run_env_empty_no_override() {
+    init_vault
+    set_secret "MY_KEY" "vault_value"
+    cat > .env <<'EOF'
+MY_KEY=
+EOF
+    local out
+    out=$("$PSST" run bash -c 'echo $MY_KEY')
+    assert_eq "$out" "vault_value"
+}
+
+test_run_no_env_unchanged() {
+    init_vault
+    set_secret "SECRET_A" "aaa"
+    # No .env file
+    local out
+    out=$("$PSST" run bash -c 'echo $SECRET_A')
+    assert_eq "$out" "aaa"
+}
+
+test_exec_env_overrides_specific() {
+    init_vault
+    set_secret "MY_KEY" "vault_val"
+    cat > .env <<'EOF'
+MY_KEY=env_val
+EOF
+    local out
+    out=$("$PSST" MY_KEY -- bash -c 'echo $MY_KEY')
+    assert_eq "$out" "env_val"
+}
+
+test_exec_env_only_secret() {
+    init_vault
+    cat > .env <<'EOF'
+ENV_ONLY=env_val
+EOF
+    local out
+    out=$("$PSST" ENV_ONLY -- bash -c 'echo $ENV_ONLY')
+    assert_eq "$out" "env_val"
+}
+
+test_exec_no_env_unchanged() {
+    init_vault
+    set_secret "MY_KEY" "vault_val"
+    # No .env file
+    local out
+    out=$("$PSST" MY_KEY -- bash -c 'echo $MY_KEY')
+    assert_eq "$out" "vault_val"
+}
+
+test_help_mentions_env() {
+    local out
+    out=$("$PSST" help)
+    assert_contains "$out" ".env"
+    assert_contains "$out" "--vault-only"
+}
+
+test_onboard_claude_includes_env_rules() {
+    local out
+    out=$("$PSST" onboard-claude 2>&1)
+    local content
+    content=$(cat CLAUDE.md)
+    assert_contains "$content" 'NEVER read `.env`'
+    assert_contains "$content" "psst get -v"
+    assert_contains "$content" "psst list"
+    assert_contains "$content" ".env Override"
+}
+
+test_onboard_claude_creates_settings() {
+    # onboard-claude should create .claude/settings.json with deny rules
+    "$PSST" onboard-claude 2>/dev/null
+    [[ -f ".claude/settings.json" ]]
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" "Read(.env)"
+    assert_contains "$content" "Read(.psst/**)"
+}
+
+test_onboard_claude_settings_idempotent() {
+    # Running twice should not duplicate deny rules
+    "$PSST" onboard-claude 2>/dev/null
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    # Count occurrences of Read(.env) — should be exactly 1
+    local count
+    count=$(grep -o 'Read(.env)' .claude/settings.json | wc -l | tr -d ' ')
+    assert_eq "$count" "1"
+}
+
+test_onboard_claude_preserves_existing_settings() {
+    # If .claude/settings.json already exists with other content, preserve it
+    mkdir -p .claude
+    cat > .claude/settings.json <<'EOF'
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test)"
+    ]
+  }
+}
+EOF
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" "Bash(npm test)"
+    assert_contains "$content" "Read(.env)"
+}
+
+test_onboard_claude_appends_to_existing_deny() {
+    mkdir -p .claude
+    cat > .claude/settings.json <<'EOF'
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf)"
+    ]
+  }
+}
+EOF
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" "Bash(rm -rf)"
+    assert_contains "$content" "Read(.env)"
+    assert_contains "$content" "Read(.psst/**)"
+    # Validate it's parseable JSON (check matching braces at minimum)
+    local open_braces close_braces
+    open_braces=$(grep -o '{' .claude/settings.json | wc -l | tr -d ' ')
+    close_braces=$(grep -o '}' .claude/settings.json | wc -l | tr -d ' ')
+    assert_eq "$open_braces" "$close_braces"
+}
+
+test_onboard_claude_adds_permissions_to_existing() {
+    mkdir -p .claude
+    cat > .claude/settings.json <<'EOF'
+{
+  "model": "opus"
+}
+EOF
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" '"model": "opus"'
+    assert_contains "$content" "Read(.env)"
+    # Validate matching braces
+    local open_braces close_braces
+    open_braces=$(grep -o '{' .claude/settings.json | wc -l | tr -d ' ')
+    close_braces=$(grep -o '}' .claude/settings.json | wc -l | tr -d ' ')
+    assert_eq "$open_braces" "$close_braces"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -699,6 +1027,7 @@ run_test "strips export prefix"             test_import_export_prefix
 run_test "skips comments and blank lines"   test_import_skips_comments
 run_test "from stdin"                       test_import_stdin
 run_test "missing file fails"               test_import_missing_file
+run_test "import works after refactor"      test_import_still_works_after_refactor
 echo ""
 
 echo "export"
@@ -728,6 +1057,7 @@ run_test "help shows usage"                 test_help
 run_test "no args shows help"               test_no_args_shows_help
 run_test "--help flag"                      test_help_flag
 run_test "help shows onboard-claude"          test_help_shows_onboard_claude
+run_test "help mentions .env override"        test_help_mentions_env
 echo ""
 
 echo "edge cases"
@@ -742,6 +1072,34 @@ echo "onboard-claude"
 run_test "creates CLAUDE.md when missing"     test_onboard_claude_creates_new
 run_test "skips if psst already present"      test_onboard_claude_already_has_psst
 run_test "appends when claude CLI missing"    test_onboard_claude_appends_fallback
+run_test "includes .env rules"                test_onboard_claude_includes_env_rules
+run_test "creates .claude/settings.json"      test_onboard_claude_creates_settings
+run_test "settings patching idempotent"       test_onboard_claude_settings_idempotent
+run_test "preserves existing settings"        test_onboard_claude_preserves_existing_settings
+run_test "appends to existing deny rules"     test_onboard_claude_appends_to_existing_deny
+run_test "adds permissions to existing"       test_onboard_claude_adds_permissions_to_existing
+echo ""
+
+echo ".env override"
+run_test "env file overrides vault"           test_load_env_file_creates_overrides
+run_test "no env file uses vault"             test_no_env_file_no_change
+run_test "empty env value no override"        test_empty_env_value_no_override
+run_test "get -v shows vault source"          test_get_verbose_shows_vault_source
+run_test "get -v shows env override source"   test_get_verbose_shows_env_source
+run_test "get -v shows env-only source"       test_get_verbose_env_only
+run_test "get --vault-only skips env"         test_get_vault_only_flag
+run_test "get -v empty env shows vault"       test_get_verbose_empty_env_shows_vault
+run_test "list shows vault source"            test_list_shows_vault_source
+run_test "list shows env override source"     test_list_shows_env_override_source
+run_test "list shows env-only source"         test_list_shows_env_only_source
+run_test "list combined sources"              test_list_combined_sources
+run_test "run: env overrides vault"           test_run_env_overrides_vault
+run_test "run: env adds new secrets"          test_run_env_adds_new_secrets
+run_test "run: empty env no override"         test_run_env_empty_no_override
+run_test "run: no env file unchanged"         test_run_no_env_unchanged
+run_test "exec: env overrides specific"       test_exec_env_overrides_specific
+run_test "exec: env-only secret works"        test_exec_env_only_secret
+run_test "exec: no env file unchanged"        test_exec_no_env_unchanged
 echo ""
 
 echo "════════════════════════════════════════"
