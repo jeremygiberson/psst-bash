@@ -878,6 +878,17 @@ test_help_mentions_env() {
     assert_contains "$out" "--vault-only"
 }
 
+test_onboard_claude_includes_env_rules() {
+    local out
+    out=$("$PSST" onboard-claude 2>&1)
+    local content
+    content=$(cat CLAUDE.md)
+    assert_contains "$content" 'NEVER read `.env`'
+    assert_contains "$content" "psst get -v"
+    assert_contains "$content" "psst list"
+    assert_contains "$content" ".env Override"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -977,6 +988,7 @@ echo "onboard-claude"
 run_test "creates CLAUDE.md when missing"     test_onboard_claude_creates_new
 run_test "skips if psst already present"      test_onboard_claude_already_has_psst
 run_test "appends when claude CLI missing"    test_onboard_claude_appends_fallback
+run_test "includes .env rules"                test_onboard_claude_includes_env_rules
 echo ""
 
 echo ".env override"
