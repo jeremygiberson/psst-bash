@@ -230,6 +230,102 @@ The `--` syntax splits args by shell rules. Pipes, semicolons, and multi-stateme
 CLAUDE_EOF
 }
 
+# Patch .claude/settings.json with deny rules for sensitive files
+_patch_claude_settings() {
+    local settings_dir=".claude"
+    local settings_file="$settings_dir/settings.json"
+
+    mkdir -p "$settings_dir"
+
+    # Idempotent: skip if already patched
+    if [[ -f "$settings_file" ]] && grep -q 'Read(.psst/\*\*)' "$settings_file" 2>/dev/null; then
+        return 0
+    fi
+
+    local deny_rules
+    deny_rules='"Read(.env)", "Read(.env.*)", "Read(.psst/**)"'
+
+    if [[ ! -f "$settings_file" ]]; then
+        # No settings file — create fresh
+        cat > "$settings_file" <<EOF
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(.psst/**)"
+    ]
+  }
+}
+EOF
+    elif grep -q '"deny"' "$settings_file" 2>/dev/null; then
+        # Has a deny array — append our rules before the closing bracket
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            /\"deny\"/ { in_deny=1 }
+            in_deny && /\]/ {
+                # Add comma after last existing item, then our new rules
+                sub(/\]/, ",\n      \"Read(.env)\",\n      \"Read(.env.*)\",\n      \"Read(.psst/**)\"\n    ]")
+                in_deny=0
+            }
+            { print }
+        ' "$settings_file" > "$tmp"
+        mv "$tmp" "$settings_file"
+    elif grep -q '"permissions"' "$settings_file" 2>/dev/null; then
+        # Has permissions but no deny — add deny array after permissions opening brace
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            /\"permissions\"/ { in_perm=1 }
+            in_perm && /{/ {
+                print
+                print "    \"deny\": ["
+                print "      \"Read(.env)\","
+                print "      \"Read(.env.*)\","
+                print "      \"Read(.psst/**)\""
+                print "    ],"
+                in_perm=0
+                next
+            }
+            { print }
+        ' "$settings_file" > "$tmp"
+        mv "$tmp" "$settings_file"
+    else
+        # No permissions block at all — add it before the closing brace
+        local tmp
+        tmp=$(mktemp)
+        awk '
+            # Find the last } and insert permissions before it
+            { lines[NR] = $0 }
+            END {
+                # Print all lines except the last (closing brace)
+                # Add comma to the last content line before the closing brace
+                for (i = 1; i < NR; i++) {
+                    if (i == NR - 1) {
+                        # Add trailing comma to last content line
+                        sub(/[[:space:]]*$/, ",", lines[i])
+                        print lines[i]
+                    } else {
+                        print lines[i]
+                    }
+                }
+                print "  \"permissions\": {"
+                print "    \"deny\": ["
+                print "      \"Read(.env)\","
+                print "      \"Read(.env.*)\","
+                print "      \"Read(.psst/**)\""
+                print "    ]"
+                print "  }"
+                print "}"
+            }
+        ' "$settings_file" > "$tmp"
+        mv "$tmp" "$settings_file"
+    fi
+
+    info "added file restrictions to .claude/settings.json (defense-in-depth)"
+}
+
 # ── Commands ─────────────────────────────────────────────────────
 
 cmd_init() {
@@ -582,17 +678,13 @@ cmd_onboard_claude() {
     if [[ ! -f "$claude_md" ]]; then
         printf '%s\n' "$instructions" > "$claude_md"
         info "created $claude_md with psst instructions"
-        return 0
-    fi
 
     # Check if psst instructions already present
-    if grep -q "Secret Management (psst)" "$claude_md" 2>/dev/null; then
+    elif grep -q "Secret Management (psst)" "$claude_md" 2>/dev/null; then
         info "$claude_md already contains psst instructions"
-        return 0
-    fi
 
     # Case 2: CLAUDE.md exists — try Claude CLI for smart merge
-    if command -v claude &>/dev/null; then
+    elif command -v claude &>/dev/null; then
         info "using Claude to integrate psst instructions into existing $claude_md"
         claude -p "Below are instructions for using the psst command. Please integrate these instructions (unmodified) directly into the existing @$claude_md file where the instructions make the most sense contextually within the document.
 
@@ -600,17 +692,19 @@ cmd_onboard_claude() {
 ${instructions}
 </psst-instructions>"
         info "psst instructions integrated into $claude_md"
-        return 0
-    fi
 
     # Case 3: Fallback — append with separator
-    {
-        echo ""
-        echo "---"
-        echo ""
-        printf '%s\n' "$instructions"
-    } >> "$claude_md"
-    info "claude CLI not found. Instructions appended to end of $claude_md — you may want to reorganize."
+    else
+        {
+            echo ""
+            echo "---"
+            echo ""
+            printf '%s\n' "$instructions"
+        } >> "$claude_md"
+        info "claude CLI not found. Instructions appended to end of $claude_md — you may want to reorganize."
+    fi
+
+    _patch_claude_settings
 }
 
 cmd_help() {

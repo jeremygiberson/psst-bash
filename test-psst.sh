@@ -889,6 +889,90 @@ test_onboard_claude_includes_env_rules() {
     assert_contains "$content" ".env Override"
 }
 
+test_onboard_claude_creates_settings() {
+    # onboard-claude should create .claude/settings.json with deny rules
+    "$PSST" onboard-claude 2>/dev/null
+    [[ -f ".claude/settings.json" ]]
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" "Read(.env)"
+    assert_contains "$content" "Read(.psst/**)"
+}
+
+test_onboard_claude_settings_idempotent() {
+    # Running twice should not duplicate deny rules
+    "$PSST" onboard-claude 2>/dev/null
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    # Count occurrences of Read(.env) — should be exactly 1
+    local count
+    count=$(grep -o 'Read(.env)' .claude/settings.json | wc -l | tr -d ' ')
+    assert_eq "$count" "1"
+}
+
+test_onboard_claude_preserves_existing_settings() {
+    # If .claude/settings.json already exists with other content, preserve it
+    mkdir -p .claude
+    cat > .claude/settings.json <<'EOF'
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test)"
+    ]
+  }
+}
+EOF
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" "Bash(npm test)"
+    assert_contains "$content" "Read(.env)"
+}
+
+test_onboard_claude_appends_to_existing_deny() {
+    mkdir -p .claude
+    cat > .claude/settings.json <<'EOF'
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf)"
+    ]
+  }
+}
+EOF
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" "Bash(rm -rf)"
+    assert_contains "$content" "Read(.env)"
+    assert_contains "$content" "Read(.psst/**)"
+    # Validate it's parseable JSON (check matching braces at minimum)
+    local open_braces close_braces
+    open_braces=$(grep -o '{' .claude/settings.json | wc -l | tr -d ' ')
+    close_braces=$(grep -o '}' .claude/settings.json | wc -l | tr -d ' ')
+    assert_eq "$open_braces" "$close_braces"
+}
+
+test_onboard_claude_adds_permissions_to_existing() {
+    mkdir -p .claude
+    cat > .claude/settings.json <<'EOF'
+{
+  "model": "opus"
+}
+EOF
+    "$PSST" onboard-claude 2>/dev/null
+    local content
+    content=$(cat .claude/settings.json)
+    assert_contains "$content" '"model": "opus"'
+    assert_contains "$content" "Read(.env)"
+    # Validate matching braces
+    local open_braces close_braces
+    open_braces=$(grep -o '{' .claude/settings.json | wc -l | tr -d ' ')
+    close_braces=$(grep -o '}' .claude/settings.json | wc -l | tr -d ' ')
+    assert_eq "$open_braces" "$close_braces"
+}
+
 # ── Run all tests ────────────────────────────────────────────────
 
 echo "psst test suite"
@@ -989,6 +1073,11 @@ run_test "creates CLAUDE.md when missing"     test_onboard_claude_creates_new
 run_test "skips if psst already present"      test_onboard_claude_already_has_psst
 run_test "appends when claude CLI missing"    test_onboard_claude_appends_fallback
 run_test "includes .env rules"                test_onboard_claude_includes_env_rules
+run_test "creates .claude/settings.json"      test_onboard_claude_creates_settings
+run_test "settings patching idempotent"       test_onboard_claude_settings_idempotent
+run_test "preserves existing settings"        test_onboard_claude_preserves_existing_settings
+run_test "appends to existing deny rules"     test_onboard_claude_appends_to_existing_deny
+run_test "adds permissions to existing"       test_onboard_claude_adds_permissions_to_existing
 echo ""
 
 echo ".env override"
